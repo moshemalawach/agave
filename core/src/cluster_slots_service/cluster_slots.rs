@@ -10,12 +10,11 @@ use {
     solana_gossip::{
         cluster_info::ClusterInfo, contact_info::ContactInfo, crds::Cursor, epoch_slots::EpochSlots,
     },
-    solana_pubkey::Pubkey,
+    solana_pubkey::{Pubkey, PubkeyHasherBuilder},
     solana_runtime::{bank::Bank, epoch_stakes::VersionedEpochStakes},
     solana_time_utils::AtomicInterval,
     std::{
         collections::{HashMap, VecDeque},
-        hash::RandomState,
         ops::Range,
         sync::{
             Arc, Mutex, RwLock,
@@ -30,14 +29,12 @@ use {
 // if we are really really far behind.
 const CLUSTER_SLOTS_TRIM_SIZE: usize = 50000;
 
-//This is intended to be switched to solana_pubkey::PubkeyHasherBuilder
-type PubkeyHasherBuilder = RandomState;
 pub(crate) type ValidatorStakesMap = HashMap<Pubkey, Stake, PubkeyHasherBuilder>;
 
 /// Static snapshot of the information about a given epoch's stake distribution.
 struct EpochStakeInfo {
     validator_stakes: Arc<ValidatorStakesMap>,
-    pubkey_to_index: Arc<HashMap<Pubkey, usize>>,
+    pubkey_to_index: Arc<HashMap<Pubkey, usize, PubkeyHasherBuilder>>,
     /// total amount of stake across all validators in `validator_stakes`.
     total_stake: Stake,
 }
@@ -55,7 +52,7 @@ impl From<&VersionedEpochStakes> for EpochStakeInfo {
 }
 
 impl EpochStakeInfo {
-    fn new(validator_stakes: HashMap<Pubkey, Stake>, total_stake: Stake) -> Self {
+    fn new(validator_stakes: ValidatorStakesMap, total_stake: Stake) -> Self {
         let pubkey_to_index: HashMap<Pubkey, usize, PubkeyHasherBuilder> = validator_stakes
             .keys()
             .enumerate()
@@ -530,7 +527,7 @@ mod tests {
         let pk2 = Pubkey::new_unique();
 
         let trimsize = CLUSTER_SLOTS_TRIM_SIZE as u64;
-        let validator_stakes = HashMap::from([(pk1, 10), (pk2, 20)]);
+        let validator_stakes = ValidatorStakesMap::from_iter([(pk1, 10), (pk2, 20)]);
         assert_eq!(
             cs.cluster_slots.read().unwrap().len(),
             0,
@@ -587,7 +584,7 @@ mod tests {
         let pk1 = Pubkey::new_unique();
         let pk2 = Pubkey::new_unique();
 
-        let validator_stakes = HashMap::from([(pk1, 10), (pk2, 20)]);
+        let validator_stakes = ValidatorStakesMap::from_iter([(pk1, 10), (pk2, 20)]);
         (pk1, pk2, validator_stakes)
     }
 
@@ -728,8 +725,8 @@ mod tests {
         let pk2 = Pubkey::new_unique();
         let pk_other = Pubkey::new_unique();
         //set stakes of pk1 high and pk2 to unstaked
-        let validator_stakes: HashMap<_, _> =
-            [(pk1, 42), (pk_other, u64::MAX / 2)].into_iter().collect();
+        let validator_stakes =
+            ValidatorStakesMap::from_iter([(pk1, 42), (pk_other, u64::MAX / 2)]);
         cs.fake_epoch_info_for_tests(validator_stakes);
         let mut epoch_slot = EpochSlots {
             from: pk_other,
@@ -768,12 +765,10 @@ mod tests {
         assert!(i.is_empty());
 
         // Give second validator max stake
-        let validator_stakes: HashMap<_, _> = [
+        let validator_stakes = ValidatorStakesMap::from_iter([
             (*contact_infos[0].pubkey(), 42),
             (*contact_infos[1].pubkey(), u64::MAX / 2),
-        ]
-        .into_iter()
-        .collect();
+        ]);
         cs.fake_epoch_info_for_tests(validator_stakes);
 
         // Mark the first validator as completed slot 9, should pick that validator,
@@ -794,7 +789,7 @@ mod tests {
             ..Default::default()
         };
         epoch_slot.fill(&[1], 0);
-        let map = HashMap::from([(pk, 42)]);
+        let map = ValidatorStakesMap::from_iter([(pk, 42)]);
         cs.fake_epoch_info_for_tests(map);
         cs.update_internal(0, vec![epoch_slot]);
         assert!(cs.lookup(1).is_some(), "slot 1 should have records");

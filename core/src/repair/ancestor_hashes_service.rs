@@ -1522,7 +1522,7 @@ mod test {
 
         // Add the responder to the eligible list for requests
         let responder_id = *responder_info.pubkey();
-        let validator_stakes = ValidatorStakesMap::from([(responder_id, 42)]);
+        let validator_stakes = ValidatorStakesMap::from_iter([(responder_id, 42)]);
         cluster_slots.fake_epoch_info_for_tests(validator_stakes);
         cluster_slots.insert_node_id(dead_slot, responder_id);
         requester_cluster_info.insert_info(responder_info.clone());
@@ -1969,7 +1969,7 @@ mod test {
 
         // Add the responder to the eligible list for requests
         let responder_id = *responder_info.pubkey();
-        let validator_stakes = ValidatorStakesMap::from([(responder_id, 42)]);
+        let validator_stakes = ValidatorStakesMap::from_iter([(responder_id, 42)]);
         cluster_slots.fake_epoch_info_for_tests(validator_stakes);
         cluster_slots.insert_node_id(dead_slot, responder_id);
         requester_cluster_info.insert_info(responder_info.clone());

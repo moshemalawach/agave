@@ -1216,7 +1216,9 @@ pub(crate) fn sleep_shred_deferment_period() {
 mod test {
     use {
         super::*,
-        crate::repair::serve_repair,
+        crate::{
+            cluster_slots_service::cluster_slots::ValidatorStakesMap, repair::serve_repair,
+        },
         solana_gossip::{contact_info::ContactInfo, node::Node},
         solana_keypair::Keypair,
         solana_ledger::{
@@ -1714,7 +1716,10 @@ mod test {
         // a valid target for repair
         let dead_slot = 9;
         let cluster_slots = ClusterSlots::default_for_tests();
-        cluster_slots.fake_epoch_info_for_tests(HashMap::from([(*valid_repair_peer.pubkey(), 42)]));
+        cluster_slots.fake_epoch_info_for_tests(ValidatorStakesMap::from_iter([(
+            *valid_repair_peer.pubkey(),
+            42,
+        )]));
         cluster_slots.insert_node_id(dead_slot, *valid_repair_peer.pubkey());
         cluster_info.insert_info(valid_repair_peer);
 
