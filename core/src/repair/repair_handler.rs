@@ -11,6 +11,7 @@ use {
     },
     agave_votor_messages::migration::MigrationStatus,
     bincode::serialize,
+    log::warn,
     solana_clock::Slot,
     solana_gossip::cluster_info::ClusterInfo,
     solana_hash::Hash,
@@ -19,6 +20,7 @@ use {
         blockstore::Blockstore,
         shred::{DATA_SHREDS_PER_FEC_BLOCK, ErasureSetId, Nonce},
     },
+    solana_metrics::datapoint_warn,
     solana_perf::packet::{Packet, PacketBatch, PacketBatchRecycler, RecycledPacketBatch},
     solana_poh::poh_recorder::SharedLeaderState,
     solana_pubkey::Pubkey,
@@ -29,6 +31,38 @@ use {
         sync::{Arc, RwLock},
     },
 };
+
+/// Convert a `Result<Option<T>, E>` from a blockstore lookup into an
+/// `Option<T>` for the repair-serve path.
+///
+/// The wire-side response semantics must remain unchanged: an IO error and
+/// a "shred not present" both result in no response to the requester.
+/// However, conflating the two is bad for operability — an oncall sees a
+/// silent miss but cannot tell whether the local node is broken (disk
+/// errors, corrupted blockstore) or simply doesn't have the data.
+///
+/// This helper preserves the `Option` semantics and emits a metric
+/// `repair_serve_blockstore_err` tagged with `kind` whenever the
+/// underlying call returned an error. Caller passes a stable `kind` label
+/// so different blockstore code paths are distinguishable.
+#[inline]
+fn log_blockstore_err<T, E: std::fmt::Display>(
+    res: Result<Option<T>, E>,
+    kind: &'static str,
+) -> Option<T> {
+    match res {
+        Ok(opt) => opt,
+        Err(err) => {
+            datapoint_warn!(
+                "repair_serve_blockstore_err",
+                ("kind", kind, String),
+                ("count", 1, i64),
+            );
+            warn!("repair_handler: blockstore {kind} returned error: {err}");
+            None
+        }
+    }
+}
 
 /// Helper function to create a PacketBatch from a serializable response
 fn create_response_packet_batch<T: serde::Serialize>(
@@ -84,14 +118,15 @@ pub trait RepairHandler {
         block_id: Hash,
         nonce: Nonce,
     ) -> Option<PacketBatch> {
-        let location = self
-            .blockstore()
-            .get_block_location(slot, block_id)
-            .ok()??;
-        let shred = self
-            .blockstore()
-            .get_data_shred_from_location(slot, shred_index, location)
-            .ok()??;
+        let location = log_blockstore_err(
+            self.blockstore().get_block_location(slot, block_id),
+            "get_block_location",
+        )?;
+        let shred = log_blockstore_err(
+            self.blockstore()
+                .get_data_shred_from_location(slot, shred_index, location),
+            "get_data_shred_from_location",
+        )?;
         let packet = repair_response_packet_from_bytes(shred, from_addr, nonce)?;
         Some(
             RecycledPacketBatch::new_with_recycler_data(
@@ -112,7 +147,7 @@ pub trait RepairHandler {
         nonce: Nonce,
     ) -> Option<PacketBatch> {
         // Try to find the requested index in one of the slots
-        let meta = self.blockstore().meta(slot).ok()??;
+        let meta = log_blockstore_err(self.blockstore().meta(slot), "meta")?;
         if meta.received > highest_index {
             // meta.received must be at least 1 by this point
             let packet = self.repair_response_packet(slot, meta.received - 1, from_addr, nonce)?;
@@ -165,15 +200,16 @@ pub trait RepairHandler {
         block_id: Hash,
         nonce: Nonce,
     ) -> Option<PacketBatch> {
-        let (double_merkle_meta, location) = self
-            .blockstore()
-            .get_double_merkle_meta_maybe_populate_proofs_for_block_id(slot, block_id)
-            .ok()??;
+        let (double_merkle_meta, location) = log_blockstore_err(
+            self.blockstore()
+                .get_double_merkle_meta_maybe_populate_proofs_for_block_id(slot, block_id),
+            "get_double_merkle_meta_maybe_populate_proofs_for_block_id",
+        )?;
 
-        let slot_meta = self
-            .blockstore()
-            .meta_from_location(slot, location)
-            .ok()??;
+        let slot_meta = log_blockstore_err(
+            self.blockstore().meta_from_location(slot, location),
+            "meta_from_location",
+        )?;
 
         let parent_slot = slot_meta.parent_slot?;
         let parent_proof = double_merkle_meta.get_parent_info_proof()?.to_vec();
@@ -201,16 +237,18 @@ pub trait RepairHandler {
         fec_set_index: u32,
         nonce: Nonce,
     ) -> Option<PacketBatch> {
-        let (double_merkle_meta, location) = self
-            .blockstore()
-            .get_double_merkle_meta_maybe_populate_proofs_for_block_id(slot, block_id)
-            .ok()??;
+        let (double_merkle_meta, location) = log_blockstore_err(
+            self.blockstore()
+                .get_double_merkle_meta_maybe_populate_proofs_for_block_id(slot, block_id),
+            "get_double_merkle_meta_maybe_populate_proofs_for_block_id",
+        )?;
 
-        let fec_set_root = self
-            .blockstore()
-            .merkle_root_meta_from_location(ErasureSetId::new(slot, fec_set_index), location)
-            .ok()??
-            .merkle_root()?;
+        let fec_set_root = log_blockstore_err(
+            self.blockstore()
+                .merkle_root_meta_from_location(ErasureSetId::new(slot, fec_set_index), location),
+            "merkle_root_meta_from_location",
+        )?
+        .merkle_root()?;
         let proof_index = fec_set_index.checked_div(DATA_SHREDS_PER_FEC_BLOCK as u32)?;
         let fec_set_proof = double_merkle_meta.get_fec_set_proof(proof_index)?.to_vec();
 
