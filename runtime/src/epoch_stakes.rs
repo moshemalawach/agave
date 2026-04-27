@@ -314,6 +314,15 @@ impl VersionedEpochStakes {
         epoch_vote_accounts: &VoteAccountsHashMap,
         leader_schedule_epoch: Epoch,
     ) -> (u64, NodeIdToVoteAccounts, EpochAuthorizedVoters) {
+        // The order in which `vote_accounts` is populated below comes from
+        // iterating `epoch_vote_accounts`, whose hasher is
+        // `PubkeyHasherBuilder` (a thread-local randomized 8-byte window
+        // over the pubkey). Two validators — or even the same validator
+        // before and after a restart — will iterate in different orders,
+        // so the resulting `Vec<Pubkey>` per node is intentionally not
+        // deterministically ordered. All consumers of
+        // `NodeVoteAccounts::vote_accounts` use the Vec for set-style
+        // membership / stake lookup only; nothing relies on its ordering.
         let mut node_id_to_vote_accounts = NodeIdToVoteAccounts::default();
         let mut epoch_authorized_voters = EpochAuthorizedVoters::default();
         let mut total_stake: u64 = 0;

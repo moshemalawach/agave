@@ -899,6 +899,41 @@ mod tests {
     }
 
     #[test]
+    fn test_fast_parser_tolerates_trailing_bytes_after_variable_length_variant() {
+        // Cover variable-length variants too: if a future refactor of
+        // `skip_string` accidentally enforced strict end-of-buffer, the
+        // `Allocate`-only test above would not catch it.
+        let feature_set = FeatureSet::all_enabled();
+        let address = Pubkey::new_unique();
+        let mut bytes = bincode::serialize(&SystemInstruction::AllocateWithSeed {
+            base: address,
+            seed: "myseed".to_string(),
+            space: 64,
+            owner: address,
+        })
+        .unwrap();
+        bytes.extend_from_slice(&[0xBB; 8]);
+        assert_eq!(
+            SystemProgramAccountAllocation::Some(64),
+            parse_system_instruction_allocation_fast(&bytes, &feature_set)
+        );
+
+        let mut bytes = bincode::serialize(&SystemInstruction::CreateAccountWithSeed {
+            base: address,
+            seed: "another".to_string(),
+            lamports: 7,
+            space: 128,
+            owner: address,
+        })
+        .unwrap();
+        bytes.extend_from_slice(&[0xCC; 16]);
+        assert_eq!(
+            SystemProgramAccountAllocation::Some(128),
+            parse_system_instruction_allocation_fast(&bytes, &feature_set)
+        );
+    }
+
+    #[test]
     fn test_fast_parser_rejects_unknown_discriminator() {
         let feature_set = FeatureSet::all_enabled();
         // SystemInstruction has 14 variants (0..=13). 14 is beyond the highest
