@@ -232,6 +232,12 @@ pub struct StreamerStats {
     pub(crate) outstanding_incoming_connection_attempts: AtomicUsize,
     pub(crate) total_incoming_connection_attempts: AtomicUsize,
     pub(crate) quic_endpoints_count: AtomicUsize,
+    /// Incremented when a `SwQosConnectionContext` reaches `on_stream_accepted`
+    /// or `on_new_stream` without a populated `stream_counter`. Should always
+    /// be zero in production: a non-zero value indicates a logic error in the
+    /// QoS state machine where the context wasn't fully initialized before
+    /// stream callbacks fired.
+    pub(crate) swqos_missing_stream_counter: AtomicUsize,
 }
 
 impl StreamerStats {
@@ -541,6 +547,11 @@ impl StreamerStats {
                 "refused_connections_too_many_open_connections",
                 self.refused_connections_too_many_open_connections
                     .swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "swqos_missing_stream_counter",
+                self.swqos_missing_stream_counter.swap(0, Ordering::Relaxed),
                 i64
             ),
         );

@@ -447,12 +447,24 @@ impl QosController<SwQosConnectionContext> for SwQos {
     fn on_stream_accepted(&self, conn_context: &SwQosConnectionContext) {
         self.staked_stream_load_ema
             .increment_load(conn_context.peer_type);
-        conn_context
-            .stream_counter
-            .as_ref()
-            .unwrap()
-            .stream_count
-            .fetch_add(1, Ordering::Relaxed);
+        if let Some(stream_counter) = conn_context.stream_counter.as_ref() {
+            stream_counter
+                .stream_count
+                .fetch_add(1, Ordering::Relaxed);
+        } else {
+            // Reaching this branch means a stream callback fired before
+            // `try_add_connection` populated the context's `stream_counter`.
+            // That's a logic error; surface it as a metric and skip the
+            // counter increment rather than panicking the QUIC accept task.
+            self.stats
+                .swqos_missing_stream_counter
+                .fetch_add(1, Ordering::Relaxed);
+            warn!(
+                "SwQos::on_stream_accepted: connection context for {:?} has no stream_counter; \
+                 skipping increment",
+                conn_context.remote_address,
+            );
+        }
     }
 
     fn on_stream_error(&self, _conn_context: &SwQosConnectionContext) {
@@ -500,8 +512,21 @@ impl QosController<SwQosConnectionContext> for SwQos {
         async move {
             let peer_type = context.peer_type();
             let remote_addr = context.remote_address;
-            let stream_counter: &Arc<ConnectionStreamCounter> =
-                context.stream_counter.as_ref().unwrap();
+            let Some(stream_counter) = context.stream_counter.as_ref() else {
+                // No counter means the context wasn't fully initialized
+                // by `try_add_connection`. Skip throttling rather than
+                // panicking the accept task; record the anomaly so it's
+                // observable.
+                self.stats
+                    .swqos_missing_stream_counter
+                    .fetch_add(1, Ordering::Relaxed);
+                warn!(
+                    "SwQos::on_new_stream: connection context for {remote_addr:?} has no \
+                     stream_counter; skipping throttle"
+                );
+                return;
+            };
+            let stream_counter: &Arc<ConnectionStreamCounter> = stream_counter;
 
             let max_streams_per_throttling_interval =
                 self.max_streams_per_throttling_interval(context);
@@ -556,6 +581,44 @@ pub mod test {
         assert_eq!(
             compute_max_allowed_uni_streams(ConnectionPeerType::Unstaked, 10000),
             QUIC_MAX_UNSTAKED_CONCURRENT_STREAMS
+        );
+    }
+
+    /// Regression test: previously `on_stream_accepted` and `on_new_stream`
+    /// would `unwrap()` `conn_context.stream_counter`, panicking the QUIC
+    /// accept task if the context wasn't fully populated. We now skip
+    /// gracefully and bump a counter.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_stream_callbacks_tolerate_missing_stream_counter() {
+        let cancel = CancellationToken::new();
+        let qos = SwQos::new(
+            SwQosConfig::default(),
+            Arc::<StreamerStats>::default(),
+            Arc::new(RwLock::new(StakedNodes::default())),
+            cancel,
+        );
+        let conn_context = SwQosConnectionContext {
+            peer_type: ConnectionPeerType::Unstaked,
+            remote_pubkey: None,
+            total_stake: 0,
+            in_staked_table: false,
+            last_update: Arc::new(AtomicU64::new(0)),
+            remote_address: "127.0.0.1:0".parse().unwrap(),
+            stream_counter: None,
+        };
+
+        // Both calls must complete without panicking.
+        qos.on_stream_accepted(&conn_context);
+        qos.on_new_stream(&conn_context).await;
+
+        // The metric should have been bumped twice.
+        let observed = qos
+            .stats
+            .swqos_missing_stream_counter
+            .load(Ordering::Relaxed);
+        assert_eq!(
+            observed, 2,
+            "swqos_missing_stream_counter should have been incremented for both callbacks"
         );
     }
 
