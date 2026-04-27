@@ -4,6 +4,7 @@ use {
     crate::{
         MaxSearch, RefCount, bucket_api::BucketApi, bucket_stats::BucketMapStats, restart::Restart,
     },
+    log::warn,
     solana_pubkey::Pubkey,
     std::{
         convert::TryInto,
@@ -144,8 +145,29 @@ impl<T: Clone + Copy + Debug + PartialEq> BucketMap<T> {
 
     fn erase_previous_drives(drives: &[PathBuf]) {
         drives.iter().for_each(|folder| {
-            let _ = fs::remove_dir_all(folder);
-            let _ = fs::create_dir_all(folder);
+            // `remove_dir_all` is best-effort: NotFound is normal on a
+            // fresh start, and other errors (permission denied, partial
+            // mount) are still recoverable by `create_dir_all` below.
+            // Log them so an operator can correlate disk problems.
+            if let Err(err) = fs::remove_dir_all(folder) {
+                if err.kind() != std::io::ErrorKind::NotFound {
+                    warn!(
+                        "BucketMap::erase_previous_drives: remove_dir_all({}) failed: {err}",
+                        folder.display(),
+                    );
+                }
+            }
+            // `create_dir_all` failure, on the other hand, leaves the
+            // bucket map in an unusable half-set-up state: subsequent
+            // mmap calls on this drive will fail. Surface it as a panic
+            // with an actionable message rather than silently continuing.
+            if let Err(err) = fs::create_dir_all(folder) {
+                panic!(
+                    "BucketMap::erase_previous_drives: create_dir_all({}) failed: {err}. The \
+                     bucket map cannot proceed without a usable drive directory.",
+                    folder.display(),
+                );
+            }
         })
     }
 
