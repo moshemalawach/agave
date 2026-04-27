@@ -10,7 +10,7 @@ use {
     },
     solana_account::{AccountSharedData, ReadableAccount},
     solana_instruction::error::InstructionError,
-    solana_pubkey::Pubkey,
+    solana_pubkey::{Pubkey, PubkeyHasherBuilder},
     std::{
         cmp::Ordering,
         collections::{HashMap, hash_map::Entry},
@@ -41,7 +41,8 @@ struct VoteAccountInner {
     vote_state_view: VoteStateView,
 }
 
-pub type VoteAccountsHashMap = HashMap<Pubkey, (/*stake:*/ u64, VoteAccount)>;
+pub type VoteAccountsHashMap =
+    HashMap<Pubkey, (/*stake:*/ u64, VoteAccount), PubkeyHasherBuilder>;
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(
@@ -213,8 +214,10 @@ impl VoteAccounts {
             entries_to_sort.retain(|(_, _, stake)| *stake > floor_stake);
         }
 
-        let mut top_entries: HashMap<Pubkey, (u64, VoteAccount)> =
-            HashMap::with_capacity(entries_to_sort.len());
+        let mut top_entries = VoteAccountsHashMap::with_capacity_and_hasher(
+            entries_to_sort.len(),
+            PubkeyHasherBuilder::default(),
+        );
         top_entries.extend(
             entries_to_sort
                 .into_iter()
@@ -481,7 +484,7 @@ impl FromIterator<(Pubkey, (/*stake:*/ u64, VoteAccount))> for VoteAccounts {
     where
         I: IntoIterator<Item = (Pubkey, (u64, VoteAccount))>,
     {
-        Self::from(Arc::new(HashMap::from_iter(iter)))
+        Self::from(Arc::new(VoteAccountsHashMap::from_iter(iter)))
     }
 }
 
@@ -510,7 +513,7 @@ where
         where
             M: MapAccess<'de>,
         {
-            let mut accounts = HashMap::new();
+            let mut accounts = VoteAccountsHashMap::default();
 
             while let Some((pubkey, (stake, account))) =
                 access.next_entry::<Pubkey, (u64, AccountSharedData)>()?

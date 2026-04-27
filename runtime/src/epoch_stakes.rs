@@ -722,7 +722,7 @@ pub(crate) mod tests {
         let ((vote_pubkey, vote_account), (stake_pubkey, stake_account)) =
             crate::stakes::tests::create_staked_node_accounts(123, &rent);
         let vote_account = VoteAccount::try_from(vote_account).unwrap();
-        let vote_accounts = VoteAccounts::from(Arc::new(HashMap::from([(
+        let vote_accounts = VoteAccounts::from(Arc::new(VoteAccountsHashMap::from_iter([(
             vote_pubkey,
             (delegated_amount, vote_account),
         )])));
