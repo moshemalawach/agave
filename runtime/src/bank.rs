@@ -2986,15 +2986,40 @@ impl Bank {
     /// - If `get_alpenglow_genesis_certificate` is called before the marker is processed by replay
     ///   this account will be empty.
     /// - If `get_alpenglow_genesis_certificate` is called after the marker is processed, we return the certificate
+    ///
+    /// If the account exists but contains data we cannot deserialize, we treat it as
+    /// equivalent to "not present" (returning `None`) and surface the corruption via a
+    /// metric and log. The previous behavior was to panic, which would take down every
+    /// validator on the cluster simultaneously since they all observe the same account
+    /// state.
     pub fn get_alpenglow_genesis_certificate(&self) -> Option<Certificate> {
         let acct = self.get_account(&GENESIS_CERTIFICATE_ACCOUNT)?;
-        (!acct.data().is_empty()).then(|| {
-            // The address is known in advance, so the account could already exist if it was prefunded.
-            // However this account cannot be written to except by us in `set_alpenglow_genesis_certificate`,
-            // so this deserialize is safe if the account is non-empty
-            wincode::deserialize(acct.data())
-                .expect("Programmer error deserializing genesis certificate")
-        })
+        if acct.data().is_empty() {
+            return None;
+        }
+        // The address is known in advance, so the account could already exist if it was prefunded.
+        // This account is normally only written by `set_alpenglow_genesis_certificate`, so a
+        // deserialize failure here means we are looking at a corrupted/preseeded account
+        // (e.g. from a buggy genesis tool or an attacker who briefly held the address).
+        match wincode::deserialize::<Certificate>(acct.data()) {
+            Ok(cert) => Some(cert),
+            Err(err) => {
+                datapoint_error!(
+                    "alpenglow_genesis_certificate_corrupt",
+                    ("slot", self.slot, i64),
+                    ("bank_id", self.bank_id, i64),
+                    ("data_len", acct.data().len() as i64, i64),
+                );
+                error!(
+                    "Bank::get_alpenglow_genesis_certificate: failed to deserialize \
+                     certificate at slot {} bank_id {} (data_len={}): {err}",
+                    self.slot,
+                    self.bank_id,
+                    acct.data().len(),
+                );
+                None
+            }
+        }
     }
 
     /// For use in the first Alpenglow block, set the genesis certificate.
