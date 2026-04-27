@@ -11718,3 +11718,27 @@ fn test_calculate_and_set_block_id_for_dcou() {
         assert_eq!(bank.block_id(), Some(expected_block_id));
     }
 }
+
+/// Regression test: `get_fields_to_serialize` used to `expect()` a populated
+/// `block_id`. A bug or out-of-order serialize on a bank without `block_id`
+/// would panic the snapshot/replay summary thread; we now fall back to
+/// `Hash::default()` and emit a metric instead.
+#[test]
+fn test_get_fields_to_serialize_without_block_id_falls_back_to_default() {
+    let bank = create_simple_test_bank(123);
+    assert!(bank.block_id().is_none());
+    // This must not panic.
+    let fields = bank.get_fields_to_serialize();
+    assert_eq!(fields.block_id, Hash::default());
+}
+
+/// Confirms the happy-path: when block_id is set, it is propagated through
+/// `get_fields_to_serialize` unchanged.
+#[test]
+fn test_get_fields_to_serialize_propagates_set_block_id() {
+    let bank = create_simple_test_bank(123);
+    let block_id = Hash::new_unique();
+    bank.set_block_id(Some(block_id));
+    let fields = bank.get_fields_to_serialize();
+    assert_eq!(fields.block_id, block_id);
+}

@@ -2093,6 +2093,27 @@ impl Bank {
 
     /// Return subset of bank fields representing serializable state
     pub(crate) fn get_fields_to_serialize(&self) -> BankFieldsToSerialize {
+        // `block_id` is expected to be populated before a bank is serialized;
+        // upstream callers (`SnapshotPackage::new`, `create_bank_snapshot_from_bank`)
+        // assert on this invariant. Historically the assertion here was an
+        // `expect()`, which would panic the snapshot/replay summary thread if
+        // a malformed code path ever serialized a pre-freeze bank. Surface the
+        // anomaly via metric+log instead and fall back to `Hash::default()`
+        // (matching the on-disk default for older snapshots without a
+        // populated block_id).
+        let block_id = self.block_id().unwrap_or_else(|| {
+            datapoint_warn!(
+                "bank_serialize_missing_block_id",
+                ("slot", self.slot, i64),
+                ("bank_id", self.bank_id, i64),
+            );
+            error!(
+                "Bank::get_fields_to_serialize: block_id is unset for slot {} bank_id {}; \
+                 falling back to Hash::default()",
+                self.slot, self.bank_id,
+            );
+            Hash::default()
+        });
         BankFieldsToSerialize {
             blockhash_queue: self.blockhash_queue.read().unwrap().clone(),
             hash: *self.hash.read().unwrap(),
@@ -2120,7 +2141,7 @@ impl Bank {
             accounts_data_len: self.load_accounts_data_size(),
             versioned_epoch_stakes: self.epoch_stakes.clone(),
             accounts_lt_hash: self.accounts_lt_hash.lock().unwrap().clone(),
-            block_id: self.block_id().expect("block id must be set"),
+            block_id,
         }
     }
 
