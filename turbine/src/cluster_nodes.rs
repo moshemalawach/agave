@@ -20,7 +20,7 @@ use {
     solana_ledger::shred::{ShredId, filter::check_feature_activation_from_bank},
     solana_native_token::LAMPORTS_PER_SOL,
     solana_net_utils::SocketAddrSpace,
-    solana_pubkey::Pubkey,
+    solana_pubkey::{Pubkey, PubkeyHasherBuilder},
     solana_runtime::bank::Bank,
     solana_signer::Signer,
     solana_time_utils::timestamp,
@@ -82,7 +82,7 @@ pub struct ClusterNodes<T> {
     // sorted by (stake, pubkey) in descending order.
     nodes: Vec<Node>,
     // Reverse index from nodes pubkey to their index in self.nodes.
-    index: HashMap<Pubkey, /*index:*/ usize>,
+    index: HashMap<Pubkey, /*index:*/ usize, PubkeyHasherBuilder>,
     // Shuffles by weights = stakes
     weighted_shuffle: WeightedShuffle,
     use_cha_cha_8: bool,
@@ -347,7 +347,7 @@ pub fn new_cluster_nodes<T: 'static>(
 ) -> ClusterNodes<T> {
     let self_pubkey = cluster_info.id();
     let nodes = get_nodes(cluster_info, cluster_type, stakes);
-    let index: HashMap<_, _> = nodes
+    let index: HashMap<Pubkey, usize, PubkeyHasherBuilder> = nodes
         .iter()
         .enumerate()
         .map(|(ix, node)| (*node.pubkey(), ix))
