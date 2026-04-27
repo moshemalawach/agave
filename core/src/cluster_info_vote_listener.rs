@@ -20,7 +20,7 @@ use {
     solana_hash::Hash,
     solana_ledger::blockstore::Blockstore,
     solana_measure::measure::Measure,
-    solana_metrics::inc_new_counter_debug,
+    solana_metrics::{inc_new_counter_debug, inc_new_counter_warn},
     solana_perf::packet::{self, PacketBatch},
     solana_pubkey::Pubkey,
     solana_rpc::{
@@ -719,7 +719,7 @@ impl ClusterInfoVoteListener {
                 // pipeline and downstream consumers (optimistic confirmation
                 // verification, fork choice gossip nudge) just see traffic
                 // disappear. Surface it.
-                inc_new_counter_debug!("vote_listener_dropped_send-gossip_verified_vote_hash", 1);
+                inc_new_counter_warn!("vote_listener_dropped_send-gossip_verified_vote_hash", 1);
                 warn!(
                     "vote_listener: gossip_verified_vote_hash_sender dropped \
                      vote_pubkey={vote_pubkey} slot={last_vote_slot}: {err}"
@@ -1388,8 +1388,6 @@ mod tests {
     #[test]
     fn test_listen_and_confirm_votes_tolerates_dropped_gossip_hash_receiver() {
         agave_logger::setup();
-        let stake_per_validator = 100;
-        let _ = stake_per_validator;
         let SetupComponents {
             vote_tracker,
             validator_voting_keypairs,

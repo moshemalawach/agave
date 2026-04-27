@@ -3001,6 +3001,14 @@ impl Bank {
         // This account is normally only written by `set_alpenglow_genesis_certificate`, so a
         // deserialize failure here means we are looking at a corrupted/preseeded account
         // (e.g. from a buggy genesis tool or an attacker who briefly held the address).
+        //
+        // Folding a corrupt cert into `None` would let the validator continue running with the
+        // wrong protocol state — `alpenglow_migration_succeeded` (bank.rs:3643) would report
+        // `false`, vote-program guards (`vote_processor.rs`) would accept legacy vote
+        // instructions when they should be rejected, and `MigrationStatus::initialize`
+        // (votor-messages/src/migration.rs) would settle into a phase that does not match the
+        // cluster. Halting via panic is the safer behavior; the surrounding `datapoint_error!`
+        // and `error!` give an oncall the data they need before the abort.
         match wincode::deserialize::<Certificate>(acct.data()) {
             Ok(cert) => Some(cert),
             Err(err) => {
@@ -3017,7 +3025,11 @@ impl Bank {
                     self.bank_id,
                     acct.data().len(),
                 );
-                None
+                panic!(
+                    "alpenglow genesis certificate at slot {} bank_id {} is corrupt; refusing \
+                     to participate in consensus with an unknown migration phase",
+                    self.slot, self.bank_id,
+                );
             }
         }
     }
