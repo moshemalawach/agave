@@ -10,7 +10,7 @@ use {
         PopVerified, PubkeyAffine as BLSPubkeyAffine, PubkeyCompressed as BLSPubkeyCompressed,
     },
     solana_clock::Epoch,
-    solana_pubkey::Pubkey,
+    solana_pubkey::{Pubkey, PubkeyHasherBuilder},
     solana_stake_interface::state::Stake,
     solana_vote::vote_account::{VoteAccounts, VoteAccountsHashMap},
     solana_vote_interface::state::BLS_PUBLIC_KEY_COMPRESSED_SIZE,
@@ -21,8 +21,8 @@ use {
     },
 };
 
-pub type NodeIdToVoteAccounts = HashMap<Pubkey, NodeVoteAccounts>;
-pub type EpochAuthorizedVoters = HashMap<Pubkey, Pubkey>;
+pub type NodeIdToVoteAccounts = HashMap<Pubkey, NodeVoteAccounts, PubkeyHasherBuilder>;
+pub type EpochAuthorizedVoters = HashMap<Pubkey, Pubkey, PubkeyHasherBuilder>;
 
 /// Entry in the [`BLSPubkeyToRankMap`] associating a validator's identity
 /// pubkey and BLS pubkey with its stake.
@@ -47,7 +47,7 @@ pub struct BLSPubkeyStakeEntry {
 #[cfg_attr(feature = "dev-context-only-utils", derive(PartialEq))]
 pub struct BLSPubkeyToRankMap {
     rank_map: HashMap<BLSPubkeyCompressed, u16>,
-    vote_pubkey_to_rank: HashMap<Pubkey, u16>,
+    vote_pubkey_to_rank: HashMap<Pubkey, u16, PubkeyHasherBuilder>,
     sorted_pubkeys: Vec<BLSPubkeyStakeEntry>,
 }
 
@@ -58,7 +58,7 @@ impl solana_frozen_abi::abi_example::AbiExample for BLSPubkeyToRankMap {
     fn example() -> Self {
         Self {
             rank_map: HashMap::new(),
-            vote_pubkey_to_rank: HashMap::new(),
+            vote_pubkey_to_rank: HashMap::default(),
             sorted_pubkeys: Vec::new(),
         }
     }
@@ -115,8 +115,10 @@ impl BLSPubkeyToRankMap {
         let mut sorted_pubkeys = Vec::with_capacity(keys_stake_entry_with_compressed.len());
         let mut bls_pubkey_to_rank_map =
             HashMap::with_capacity(keys_stake_entry_with_compressed.len());
-        let mut vote_pubkey_to_rank_map =
-            HashMap::with_capacity(keys_stake_entry_with_compressed.len());
+        let mut vote_pubkey_to_rank_map = HashMap::with_capacity_and_hasher(
+            keys_stake_entry_with_compressed.len(),
+            PubkeyHasherBuilder::default(),
+        );
         for (rank, (entry, bls_pubkey_compressed)) in
             keys_stake_entry_with_compressed.into_iter().enumerate()
         {
@@ -312,8 +314,8 @@ impl VersionedEpochStakes {
         epoch_vote_accounts: &VoteAccountsHashMap,
         leader_schedule_epoch: Epoch,
     ) -> (u64, NodeIdToVoteAccounts, EpochAuthorizedVoters) {
-        let mut node_id_to_vote_accounts: NodeIdToVoteAccounts = HashMap::new();
-        let mut epoch_authorized_voters: EpochAuthorizedVoters = HashMap::new();
+        let mut node_id_to_vote_accounts = NodeIdToVoteAccounts::default();
+        let mut epoch_authorized_voters = EpochAuthorizedVoters::default();
         let mut total_stake: u64 = 0;
 
         for (key, (stake, account)) in epoch_vote_accounts.iter() {
