@@ -6486,7 +6486,15 @@ fn calculate_data_size_delta(old_data_size: usize, new_data_size: usize) -> i64 
 
 impl Drop for Bank {
     fn drop(&mut self) {
-        if let Some(drop_callback) = self.drop_callback.read().unwrap().0.as_ref() {
+        // Drop must never panic; if another thread panicked while holding
+        // the write lock we still want to release resources cleanly. Recover
+        // the inner value from a poisoned guard rather than re-panicking,
+        // which during unwind would `abort()` the process.
+        let drop_callback_guard = self
+            .drop_callback
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(drop_callback) = drop_callback_guard.0.as_ref() {
             drop_callback.callback(self);
         } else {
             // Default case for tests

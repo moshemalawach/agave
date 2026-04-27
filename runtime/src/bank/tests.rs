@@ -11742,3 +11742,23 @@ fn test_get_fields_to_serialize_propagates_set_block_id() {
     let fields = bank.get_fields_to_serialize();
     assert_eq!(fields.block_id, block_id);
 }
+
+/// Regression test: dropping a Bank with a poisoned `drop_callback` lock
+/// must not panic. Previously `Drop` did `read().unwrap()`, which would
+/// re-panic during unwind and abort the process.
+#[test]
+fn test_bank_drop_tolerates_poisoned_drop_callback_lock() {
+    let bank = Arc::new(create_simple_test_bank(123));
+    let bank_for_thread = Arc::clone(&bank);
+    // Poison the RwLock by panicking while holding the write guard.
+    let panicker = std::thread::spawn(move || {
+        let _guard = bank_for_thread.drop_callback.write().unwrap();
+        panic!("intentional panic to poison drop_callback lock");
+    });
+    let join_result = panicker.join();
+    assert!(join_result.is_err(), "panicker thread should have panicked");
+    assert!(bank.drop_callback.is_poisoned());
+    // Now drop the last Arc — Bank::drop will read the poisoned lock.
+    // Must not panic. (Test framework would catch a panic and fail.)
+    drop(bank);
+}
