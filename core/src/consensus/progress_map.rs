@@ -463,11 +463,12 @@ mod test {
         let vote_account_pubkeys: Vec<_> = std::iter::repeat_with(solana_pubkey::new_rand)
             .take(num_vote_accounts)
             .collect();
-        let epoch_vote_accounts: HashMap<_, _> = vote_account_pubkeys
-            .iter()
-            .skip(num_vote_accounts - staked_vote_accounts)
-            .map(|pubkey| (*pubkey, (1, VoteAccount::new_random())))
-            .collect();
+        let epoch_vote_accounts = VoteAccountsHashMap::from_iter(
+            vote_account_pubkeys
+                .iter()
+                .skip(num_vote_accounts - staked_vote_accounts)
+                .map(|pubkey| (*pubkey, (1, VoteAccount::new_random()))),
+        );
 
         let mut stats = PropagatedStats::default();
         let mut node_pubkey = solana_pubkey::new_rand();
@@ -505,11 +506,12 @@ mod test {
         let vote_account_pubkeys: Vec<_> = std::iter::repeat_with(solana_pubkey::new_rand)
             .take(num_vote_accounts)
             .collect();
-        let epoch_vote_accounts: HashMap<_, _> = vote_account_pubkeys
-            .iter()
-            .skip(num_vote_accounts - staked_vote_accounts)
-            .map(|pubkey| (*pubkey, (1, VoteAccount::new_random())))
-            .collect();
+        let epoch_vote_accounts = VoteAccountsHashMap::from_iter(
+            vote_account_pubkeys
+                .iter()
+                .skip(num_vote_accounts - staked_vote_accounts)
+                .map(|pubkey| (*pubkey, (1, VoteAccount::new_random()))),
+        );
         stats.add_node_pubkey_internal(&node_pubkey, &vote_account_pubkeys, &epoch_vote_accounts);
         assert!(stats.propagated_node_ids.contains(&node_pubkey));
         assert_eq!(
