@@ -709,11 +709,22 @@ impl ClusterInfoVoteListener {
         );
 
         if is_gossip_vote && is_new && stake > 0 {
-            let _ = notifiers.gossip_verified_vote_hash_sender.send((
+            if let Err(err) = notifiers.gossip_verified_vote_hash_sender.send((
                 *vote_pubkey,
                 last_vote_slot,
                 last_vote_hash,
-            ));
+            )) {
+                // The receiver has gone away. Without this log/metric the
+                // vote tracker silently stops feeding the gossip-verified
+                // pipeline and downstream consumers (optimistic confirmation
+                // verification, fork choice gossip nudge) just see traffic
+                // disappear. Surface it.
+                inc_new_counter_debug!("vote_listener_dropped_send-gossip_verified_vote_hash", 1);
+                warn!(
+                    "vote_listener: gossip_verified_vote_hash_sender dropped \
+                     vote_pubkey={vote_pubkey} slot={last_vote_slot}: {err}"
+                );
+            }
         }
 
         let reached_duplicate_confirmed = reached_threshold_results[0];
@@ -721,7 +732,16 @@ impl ClusterInfoVoteListener {
 
         if reached_duplicate_confirmed {
             if let Some(ref sender) = notifiers.duplicate_confirmed_slot_sender {
-                let _ = sender.send(vec![(last_vote_slot, last_vote_hash)]);
+                if let Err(err) = sender.send(vec![(last_vote_slot, last_vote_hash)]) {
+                    inc_new_counter_debug!(
+                        "vote_listener_dropped_send-duplicate_confirmed_slot",
+                        1
+                    );
+                    warn!(
+                        "vote_listener: duplicate_confirmed_slot_sender dropped \
+                         slot={last_vote_slot}: {err}"
+                    );
+                }
             }
         }
 
@@ -1356,6 +1376,71 @@ mod tests {
     fn test_process_votes1() {
         run_test_process_votes(None);
         run_test_process_votes(Some(Hash::default()));
+    }
+
+    /// Regression test: dropping the `gossip_verified_vote_hash_sender`
+    /// receiver while votes are still being processed used to silently
+    /// swallow `SendError`. The vote tracker would keep working but
+    /// downstream consumers (optimistic confirmation verification, etc.)
+    /// would just see traffic disappear. We now log+meter the error;
+    /// this test confirms the listener still completes successfully when
+    /// the receiver has been dropped.
+    #[test]
+    fn test_listen_and_confirm_votes_tolerates_dropped_gossip_hash_receiver() {
+        agave_logger::setup();
+        let stake_per_validator = 100;
+        let _ = stake_per_validator;
+        let SetupComponents {
+            vote_tracker,
+            validator_voting_keypairs,
+            subscriptions,
+            bank: bank0,
+            ..
+        } = setup();
+
+        let (votes_txs_sender, votes_txs_receiver) = unbounded();
+        let (replay_votes_sender, replay_votes_receiver) = unbounded();
+        let (gossip_verified_vote_hash_sender, gossip_verified_vote_hash_receiver) = unbounded();
+        let (verified_voter_slots_sender, _verified_voter_slots_receiver) = unbounded();
+        let mut latest_vote_slot_per_validator = HashMap::new();
+
+        send_vote_txs(
+            vec![1, 2],
+            vec![3, 4],
+            &validator_voting_keypairs,
+            None,
+            &votes_txs_sender,
+            &replay_votes_sender,
+        );
+
+        // Drop the receiver before processing — every send into the
+        // sender will now fail with `SendError`.
+        drop(gossip_verified_vote_hash_receiver);
+
+        let notifiers = ConfirmationNotifiers {
+            gossip_verified_vote_hash_sender: gossip_verified_vote_hash_sender.clone(),
+            verified_voter_slots_sender: verified_voter_slots_sender.clone(),
+            rpc_subscriptions: Some(subscriptions.clone()),
+            bank_notification_sender: None,
+            duplicate_confirmed_slot_sender: None,
+            migration_status: Arc::new(MigrationStatus::default()),
+        };
+        let mut replay_vote_buffer = VoteBuffer::new();
+        // Must succeed: the dropped receiver is logged, not propagated.
+        ClusterInfoVoteListener::listen_and_confirm_votes(
+            &votes_txs_receiver,
+            &vote_tracker,
+            &bank0,
+            &replay_votes_receiver,
+            &mut replay_vote_buffer,
+            &notifiers,
+            &mut None,
+            &mut latest_vote_slot_per_validator,
+        )
+        .expect(
+            "listen_and_confirm_votes should succeed even when gossip_verified_vote_hash \
+             receiver has been dropped",
+        );
     }
 
     #[test]
