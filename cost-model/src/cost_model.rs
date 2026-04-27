@@ -8,18 +8,19 @@
 use {
     crate::{block_cost_limits::*, transaction_cost::*},
     agave_feature_set::FeatureSet,
-    solana_bincode::limited_deserialize,
     solana_compute_budget::compute_budget_limits::DEFAULT_HEAP_COST,
+    solana_packet::PACKET_DATA_SIZE,
     solana_pubkey::Pubkey,
     solana_runtime_transaction::transaction_meta::TransactionMeta,
     solana_sdk_ids::system_program,
     solana_svm_transaction::{instruction::SVMInstruction, svm_message::SVMStaticMessage},
     solana_system_interface::{
         MAX_PERMITTED_ACCOUNTS_DATA_ALLOCATIONS_PER_TRANSACTION, MAX_PERMITTED_DATA_LENGTH,
-        instruction::SystemInstruction,
     },
     std::num::Saturating,
 };
+#[cfg(test)]
+use solana_system_interface::instruction::SystemInstruction;
 
 const ACCOUNT_DATA_COST_PAGE_SIZE: u64 = 32_u64.saturating_mul(1024);
 
@@ -219,6 +220,9 @@ impl CostModel {
         Self::calculate_pages_cost(Self::calculate_pages_for_bytes(loaded_accounts_data_size))
     }
 
+    // Reference implementation kept for the equivalence tests against
+    // [`parse_system_instruction_allocation_fast`].
+    #[cfg(test)]
     fn calculate_account_data_size_on_deserialized_system_instruction(
         instruction: SystemInstruction,
         feature_set: &FeatureSet,
@@ -264,16 +268,7 @@ impl CostModel {
         feature_set: &FeatureSet,
     ) -> SystemProgramAccountAllocation {
         if program_id == &system_program::id() {
-            if let Ok(instruction) =
-                limited_deserialize(instruction.data, solana_packet::PACKET_DATA_SIZE as u64)
-            {
-                Self::calculate_account_data_size_on_deserialized_system_instruction(
-                    instruction,
-                    feature_set,
-                )
-            } else {
-                SystemProgramAccountAllocation::Failed
-            }
+            parse_system_instruction_allocation_fast(instruction.data, feature_set)
         } else {
             SystemProgramAccountAllocation::None
         }
@@ -318,6 +313,177 @@ impl CostModel {
         (MAX_PERMITTED_ACCOUNTS_DATA_ALLOCATIONS_PER_TRANSACTION as u64)
             .min(tx_attempted_allocation_size.0)
     }
+}
+
+// Bincode-with-fixint encoded byte sizes for the fields the fast path inspects.
+// `String`/`Vec` are length-prefixed with a fixint `u64`, which already maps to
+// `U64_LEN` here — we don't need a separate constant for it.
+const ADDRESS_LEN: usize = 32;
+const U64_LEN: usize = 8;
+const DISCRIMINATOR_LEN: usize = 4;
+
+/// Parse a `SystemInstruction`'s account allocation impact directly from raw
+/// instruction bytes, equivalent to running the bincode deserializer followed
+/// by [`CostModel::calculate_account_data_size_on_deserialized_system_instruction`]
+/// but without allocating intermediate `String` / `Address` values for the
+/// common fixed-layout variants.
+///
+/// Bincode encoding details mirrored here:
+/// - `solana_bincode::limited_deserialize` uses `with_fixint_encoding()` and
+///   `allow_trailing_bytes()`, so all integers are little-endian fixed-width
+///   and trailing bytes after a fully-decoded payload are tolerated.
+/// - The discriminator is a `u32`.
+/// - `String` fields are length-prefixed with a `u64`.
+fn parse_system_instruction_allocation_fast(
+    data: &[u8],
+    feature_set: &FeatureSet,
+) -> SystemProgramAccountAllocation {
+    if data.len() > PACKET_DATA_SIZE {
+        return SystemProgramAccountAllocation::Failed;
+    }
+
+    let validate_space = |space: u64| {
+        if space > MAX_PERMITTED_DATA_LENGTH {
+            SystemProgramAccountAllocation::Failed
+        } else {
+            SystemProgramAccountAllocation::Some(space)
+        }
+    };
+
+    // Inner closure returns `None` on any decoding failure (truncated payload,
+    // unknown discriminator, overflow). The outer match maps that to `Failed`,
+    // matching the bincode error path.
+    let parsed = (|| -> Option<SystemProgramAccountAllocation> {
+        let mut cursor = 0usize;
+        let discriminator = read_u32_le(data, &mut cursor)?;
+        let allocation = match discriminator {
+            // CreateAccount { lamports: u64, space: u64, owner: Address }
+            0 => {
+                skip(data, &mut cursor, U64_LEN)?; // lamports
+                let space = read_u64_le(data, &mut cursor)?;
+                skip(data, &mut cursor, ADDRESS_LEN)?; // owner
+                validate_space(space)
+            }
+            // Assign { owner: Address }
+            1 => {
+                skip(data, &mut cursor, ADDRESS_LEN)?;
+                SystemProgramAccountAllocation::None
+            }
+            // Transfer { lamports: u64 }
+            2 => {
+                skip(data, &mut cursor, U64_LEN)?;
+                SystemProgramAccountAllocation::None
+            }
+            // CreateAccountWithSeed { base: Address, seed: String, lamports: u64,
+            //                          space: u64, owner: Address }
+            3 => {
+                skip(data, &mut cursor, ADDRESS_LEN)?; // base
+                skip_string(data, &mut cursor)?; // seed
+                skip(data, &mut cursor, U64_LEN)?; // lamports
+                let space = read_u64_le(data, &mut cursor)?;
+                skip(data, &mut cursor, ADDRESS_LEN)?; // owner
+                validate_space(space)
+            }
+            // AdvanceNonceAccount (no payload)
+            4 => SystemProgramAccountAllocation::None,
+            // WithdrawNonceAccount(u64)
+            5 => {
+                skip(data, &mut cursor, U64_LEN)?;
+                SystemProgramAccountAllocation::None
+            }
+            // InitializeNonceAccount(Address)
+            6 => {
+                skip(data, &mut cursor, ADDRESS_LEN)?;
+                SystemProgramAccountAllocation::None
+            }
+            // AuthorizeNonceAccount(Address)
+            7 => {
+                skip(data, &mut cursor, ADDRESS_LEN)?;
+                SystemProgramAccountAllocation::None
+            }
+            // Allocate { space: u64 }
+            8 => {
+                let space = read_u64_le(data, &mut cursor)?;
+                validate_space(space)
+            }
+            // AllocateWithSeed { base: Address, seed: String, space: u64,
+            //                     owner: Address }
+            9 => {
+                skip(data, &mut cursor, ADDRESS_LEN)?; // base
+                skip_string(data, &mut cursor)?; // seed
+                let space = read_u64_le(data, &mut cursor)?;
+                skip(data, &mut cursor, ADDRESS_LEN)?; // owner
+                validate_space(space)
+            }
+            // AssignWithSeed { base: Address, seed: String, owner: Address }
+            10 => {
+                skip(data, &mut cursor, ADDRESS_LEN)?;
+                skip_string(data, &mut cursor)?;
+                skip(data, &mut cursor, ADDRESS_LEN)?;
+                SystemProgramAccountAllocation::None
+            }
+            // TransferWithSeed { lamports: u64, from_seed: String,
+            //                     from_owner: Address }
+            11 => {
+                skip(data, &mut cursor, U64_LEN)?;
+                skip_string(data, &mut cursor)?;
+                skip(data, &mut cursor, ADDRESS_LEN)?;
+                SystemProgramAccountAllocation::None
+            }
+            // UpgradeNonceAccount (no payload)
+            12 => SystemProgramAccountAllocation::None,
+            // CreateAccountAllowPrefund { lamports: u64, space: u64, owner: Address }
+            //
+            // Mirrors the existing logic: feature gate must be active or we
+            // shortcut the whole transaction's account-data accounting.
+            13 => {
+                skip(data, &mut cursor, U64_LEN)?; // lamports
+                let space = read_u64_le(data, &mut cursor)?;
+                skip(data, &mut cursor, ADDRESS_LEN)?; // owner
+                if !feature_set.snapshot().create_account_allow_prefund {
+                    return Some(SystemProgramAccountAllocation::Failed);
+                }
+                validate_space(space)
+            }
+            _ => return None,
+        };
+        Some(allocation)
+    })();
+
+    parsed.unwrap_or(SystemProgramAccountAllocation::Failed)
+}
+
+#[inline]
+fn read_u32_le(data: &[u8], cursor: &mut usize) -> Option<u32> {
+    let end = cursor.checked_add(DISCRIMINATOR_LEN)?;
+    let bytes: [u8; DISCRIMINATOR_LEN] = data.get(*cursor..end)?.try_into().ok()?;
+    *cursor = end;
+    Some(u32::from_le_bytes(bytes))
+}
+
+#[inline]
+fn read_u64_le(data: &[u8], cursor: &mut usize) -> Option<u64> {
+    let end = cursor.checked_add(U64_LEN)?;
+    let bytes: [u8; U64_LEN] = data.get(*cursor..end)?.try_into().ok()?;
+    *cursor = end;
+    Some(u64::from_le_bytes(bytes))
+}
+
+#[inline]
+fn skip(data: &[u8], cursor: &mut usize, n: usize) -> Option<()> {
+    let end = cursor.checked_add(n)?;
+    if end > data.len() {
+        return None;
+    }
+    *cursor = end;
+    Some(())
+}
+
+#[inline]
+fn skip_string(data: &[u8], cursor: &mut usize) -> Option<()> {
+    let len = read_u64_le(data, cursor)?;
+    let len = usize::try_from(len).ok()?;
+    skip(data, cursor, len)
 }
 
 #[cfg(test)]
@@ -574,6 +740,192 @@ mod tests {
                 instruction,
                 &feature_set_disabled
             )
+        );
+    }
+
+    fn run_equivalence_for(instruction: &SystemInstruction, feature_set: &FeatureSet) {
+        let bytes = bincode::serialize(instruction).expect("bincode serialize");
+        let expected = CostModel::calculate_account_data_size_on_deserialized_system_instruction(
+            instruction.clone(),
+            feature_set,
+        );
+        let actual = parse_system_instruction_allocation_fast(&bytes, feature_set);
+        assert_eq!(
+            expected, actual,
+            "fast path diverges from bincode path for {instruction:?}"
+        );
+    }
+
+    #[test]
+    fn test_fast_parser_matches_bincode_for_every_variant() {
+        let feature_set = FeatureSet::all_enabled();
+        let address = Pubkey::new_unique();
+        let seed = "abcdefghijklmnopqrstuvwxyz".to_string();
+        let lamports = 12345u64;
+        let space = 6789u64;
+
+        let cases = [
+            SystemInstruction::CreateAccount {
+                lamports,
+                space,
+                owner: address,
+            },
+            SystemInstruction::Assign { owner: address },
+            SystemInstruction::Transfer { lamports },
+            SystemInstruction::CreateAccountWithSeed {
+                base: address,
+                seed: seed.clone(),
+                lamports,
+                space,
+                owner: address,
+            },
+            SystemInstruction::AdvanceNonceAccount,
+            SystemInstruction::WithdrawNonceAccount(lamports),
+            SystemInstruction::InitializeNonceAccount(address),
+            SystemInstruction::AuthorizeNonceAccount(address),
+            SystemInstruction::Allocate { space },
+            SystemInstruction::AllocateWithSeed {
+                base: address,
+                seed: seed.clone(),
+                space,
+                owner: address,
+            },
+            SystemInstruction::AssignWithSeed {
+                base: address,
+                seed: seed.clone(),
+                owner: address,
+            },
+            SystemInstruction::TransferWithSeed {
+                lamports,
+                from_seed: seed,
+                from_owner: address,
+            },
+            SystemInstruction::UpgradeNonceAccount,
+            SystemInstruction::CreateAccountAllowPrefund {
+                lamports,
+                space,
+                owner: address,
+            },
+        ];
+        for ix in &cases {
+            run_equivalence_for(ix, &feature_set);
+        }
+    }
+
+    #[test]
+    fn test_fast_parser_validates_create_account_allow_prefund_feature() {
+        let address = Pubkey::new_unique();
+        let instruction = SystemInstruction::CreateAccountAllowPrefund {
+            lamports: 100,
+            space: 4096,
+            owner: address,
+        };
+        let bytes = bincode::serialize(&instruction).unwrap();
+
+        let enabled = FeatureSet::all_enabled();
+        assert_eq!(
+            SystemProgramAccountAllocation::Some(4096),
+            parse_system_instruction_allocation_fast(&bytes, &enabled)
+        );
+
+        let disabled = FeatureSet::default();
+        assert_eq!(
+            SystemProgramAccountAllocation::Failed,
+            parse_system_instruction_allocation_fast(&bytes, &disabled)
+        );
+    }
+
+    #[test]
+    fn test_fast_parser_rejects_oversized_data() {
+        let feature_set = FeatureSet::all_enabled();
+        let oversized = vec![0u8; PACKET_DATA_SIZE + 1];
+        assert_eq!(
+            SystemProgramAccountAllocation::Failed,
+            parse_system_instruction_allocation_fast(&oversized, &feature_set)
+        );
+    }
+
+    #[test]
+    fn test_fast_parser_rejects_truncated_payload() {
+        let feature_set = FeatureSet::all_enabled();
+        let address = Pubkey::new_unique();
+
+        let mut allocate = bincode::serialize(&SystemInstruction::Allocate { space: 64 }).unwrap();
+        allocate.truncate(allocate.len() - 1);
+        assert_eq!(
+            SystemProgramAccountAllocation::Failed,
+            parse_system_instruction_allocation_fast(&allocate, &feature_set)
+        );
+
+        let mut create = bincode::serialize(&SystemInstruction::CreateAccount {
+            lamports: 1,
+            space: 2,
+            owner: address,
+        })
+        .unwrap();
+        create.truncate(create.len() - 1);
+        assert_eq!(
+            SystemProgramAccountAllocation::Failed,
+            parse_system_instruction_allocation_fast(&create, &feature_set)
+        );
+
+        let mut with_seed = bincode::serialize(&SystemInstruction::CreateAccountWithSeed {
+            base: address,
+            seed: "seed".to_string(),
+            lamports: 1,
+            space: 2,
+            owner: address,
+        })
+        .unwrap();
+        // Drop the trailing owner bytes; the seed-length prefix still fits.
+        with_seed.truncate(with_seed.len() - ADDRESS_LEN);
+        assert_eq!(
+            SystemProgramAccountAllocation::Failed,
+            parse_system_instruction_allocation_fast(&with_seed, &feature_set)
+        );
+    }
+
+    #[test]
+    fn test_fast_parser_tolerates_trailing_bytes() {
+        let feature_set = FeatureSet::all_enabled();
+        let mut bytes = bincode::serialize(&SystemInstruction::Allocate { space: 16 }).unwrap();
+        bytes.extend_from_slice(&[0xAA; 8]);
+        // bincode's `allow_trailing_bytes()` makes this a successful decode; the
+        // fast path must match that lenience.
+        assert_eq!(
+            SystemProgramAccountAllocation::Some(16),
+            parse_system_instruction_allocation_fast(&bytes, &feature_set)
+        );
+    }
+
+    #[test]
+    fn test_fast_parser_rejects_unknown_discriminator() {
+        let feature_set = FeatureSet::all_enabled();
+        // SystemInstruction has 14 variants (0..=13). 14 is beyond the highest
+        // valid discriminator and bincode would also reject it.
+        let mut bytes = vec![0u8; 64];
+        bytes[..4].copy_from_slice(&14u32.to_le_bytes());
+        assert_eq!(
+            SystemProgramAccountAllocation::Failed,
+            parse_system_instruction_allocation_fast(&bytes, &feature_set)
+        );
+    }
+
+    #[test]
+    fn test_fast_parser_rejects_overlong_seed() {
+        let feature_set = FeatureSet::all_enabled();
+        // Build a CreateAccountWithSeed payload but lie about the seed length so
+        // that the trailing fields would be cut off.
+        let address = Pubkey::new_unique();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&3u32.to_le_bytes()); // CreateAccountWithSeed
+        bytes.extend_from_slice(address.as_ref()); // base
+        bytes.extend_from_slice(&u64::MAX.to_le_bytes()); // bogus seed length
+        // Append nothing else; with the wrong length the parser should bail
+        // before reading lamports/space/owner.
+        assert_eq!(
+            SystemProgramAccountAllocation::Failed,
+            parse_system_instruction_allocation_fast(&bytes, &feature_set)
         );
     }
 

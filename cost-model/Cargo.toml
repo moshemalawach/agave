@@ -36,7 +36,6 @@ frozen-abi = [
 agave-feature-set = { workspace = true }
 ahash = { workspace = true }
 log = { workspace = true }
-solana-bincode = { workspace = true }
 solana-clock = { workspace = true }
 solana-compute-budget = { workspace = true }
 solana-compute-budget-instruction = { workspace = true }
@@ -64,6 +63,7 @@ solana-vote-program = { workspace = true }
 [dev-dependencies]
 agave-logger = { path = "../logger", features = ["agave-unstable-api"] }
 agave-reserved-account-keys = { path = "../reserved-account-keys", features = ["agave-unstable-api"] }
+bincode = { workspace = true }
 itertools = { workspace = true }
 rand = { workspace = true }
 # See order-crates-for-publishing.py for using this unusual `path = "."`
