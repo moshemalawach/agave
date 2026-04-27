@@ -170,12 +170,24 @@ impl Default for PrioritizationFeeCache {
 
 impl Drop for PrioritizationFeeCache {
     fn drop(&mut self) {
-        let _ = self.sender.send(CacheServiceUpdate::Exit);
-        self.service_thread
-            .take()
-            .unwrap()
-            .join()
-            .expect("Prioritization fee cache servicing thread failed to join");
+        // Drop must never panic. If the service thread already exited (sender
+        // closed) or panicked itself, we surface that via logs but never
+        // propagate a panic from here — doing so during another panic's
+        // unwind would `abort()` the process.
+        if let Err(err) = self.sender.send(CacheServiceUpdate::Exit) {
+            error!(
+                "PrioritizationFeeCache: failed to send Exit to service thread (already \
+                 stopped?): {err}"
+            );
+        }
+        if let Some(handle) = self.service_thread.take() {
+            if let Err(panic_payload) = handle.join() {
+                error!(
+                    "PrioritizationFeeCache: service thread panicked while shutting down: {:?}",
+                    panic_payload
+                );
+            }
+        }
     }
 }
 
@@ -986,5 +998,29 @@ mod tests {
                 ])
             );
         }
+    }
+
+    /// Drop must never panic. If the service thread already exited (so
+    /// the bounded channel drops the Exit message) we should still clean
+    /// up gracefully without aborting the process.
+    #[test]
+    fn test_drop_does_not_panic_when_service_thread_already_exited() {
+        let cache = PrioritizationFeeCache::new(MAX_NUM_RECENT_BLOCKS);
+        // Force the service thread to exit early by sending an Exit ourselves
+        // and joining it. After this point, our Drop impl will hit a closed
+        // channel.
+        cache
+            .sender
+            .send(CacheServiceUpdate::Exit)
+            .expect("first Exit send should succeed");
+        // Drain any sender clones we might have leaked? There aren't any.
+        // Wait for the worker to actually drain and exit. We do this by
+        // racing against `drop` — if it doesn't panic when the worker is
+        // already gone, the test passes. Sleep briefly to let the thread
+        // exit before drop runs.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        // Simply dropping `cache` exercises the Drop impl. If it panics,
+        // the test harness will fail.
+        drop(cache);
     }
 }
